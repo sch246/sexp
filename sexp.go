@@ -8,7 +8,7 @@ import (
 
 type ErrNotClosed struct {
 	message string
-	IsString bool
+	IsString int
 }
 
 func (e ErrNotClosed) Error() string {
@@ -124,14 +124,17 @@ func (p *parser) parse() (Element, error) {
 	case ch == '+' || ch == '-' || (ch >= '0' && ch <= '9'):
 		// 如果是数字，则解析整数或浮点数
 		return p.parseNumber()
+	case ch == '\\':
+		// 如果是反斜杠，则解析转义字符
+		return p.parseEscape()
 	default:
-		// 否则解析符号
+		// 否则解析符号，解析前会跳过空白字符，所以必定是非空白字符开头
 		return p.parseSymbol()
 	}
 }
 
 // parseList 解析列表
-func (p *parser) parseList(ops ...string) (Element, error) {
+func (p *parser) parseList() (Element, error) {
 	// 读取左括号
 	p.read()
 
@@ -145,7 +148,7 @@ func (p *parser) parseList(ops ...string) (Element, error) {
 	for p.peek() != ')' {
 		// 如果是EOF，则返回错误
 		if p.peek() == 0 {
-			return nil, ErrNotClosed{fmt.Sprintf("expected ')' at %s:%d:%d", p.file, p.line, p.col), false}
+			return nil, ErrNotClosed{fmt.Sprintf("expected ')' at %s:%d:%d", p.file, p.line, p.col), 0}
 		}
 		// 解析列表元素
 		e, err := p.parse()
@@ -154,7 +157,9 @@ func (p *parser) parseList(ops ...string) (Element, error) {
 		}
 
 		// 将元素添加到列表中
-		l = append(l, e)
+		if e != nil {//遇到续行符时会出现nil
+			l = append(l, e)
+		}
 
 		// 跳过空白字符
 		p.skipWhitespace()
@@ -163,21 +168,6 @@ func (p *parser) parseList(ops ...string) (Element, error) {
 	// 读取右括号
 	p.read()
 
-	// 返回列表
-	if len(ops) > 0 {
-		var op string
-		for i:=len(ops)-1; i>=0; i-- {
-			op = ops[i]
-			switch op {
-			case "'":
-				l = List{Symbol{"quote"}, l}
-			case ",":
-				l = List{Symbol{"unquote"}, l}
-			default:
-				l = List{Symbol{op}, l}
-			}
-		}
-	}
 	return l, nil
 }
 
@@ -194,7 +184,7 @@ func (p *parser) parseString(ops ...string) (Element, error) {
 	for {
 		// 如果是EOF，则返回错误
 		if p.peek() == 0 {
-			return nil, ErrNotClosed{fmt.Sprintf("expected '\"' at %s:%d:%d", p.file, p.line, p.col), true}
+			return nil, ErrNotClosed{fmt.Sprintf("expected '\"' at %s:%d:%d", p.file, p.line, p.col), 1}
 		}
 		// 获取当前字符
 		ch := p.read()
@@ -212,11 +202,13 @@ func (p *parser) parseString(ops ...string) (Element, error) {
 				continue
 			} else {
 				// 如果不是原始字符串，则解析转义字符
-				ch, err := p.parseEscape()
+				ch, err := p.parseStringEscape()
 				if err != nil {
 					return nil, err
 				}
-				b.WriteRune(ch)
+				if ch != 0 {
+					b.WriteRune(ch)
+				}
 				continue
 			}
 		}
@@ -229,36 +221,26 @@ func (p *parser) parseString(ops ...string) (Element, error) {
 	return String{b.String()}, nil
 }
 
-// parseEscape 解析转义字符
-func (p *parser) parseEscape() (rune, error) {
+// parseStringEscape 解析转义字符
+func (p *parser) parseStringEscape() (rune, error) {
 	ch := p.read()
 	switch ch {
-	case 'n':
-		// 换行符
-		ch = '\n'
-	case 'r':
-		// 回车符
-		ch = '\r'
-	case 't':
-		// 制表符
-		ch = '\t'
-	case 'b':
-		// 退格符
-		ch = '\b'
-	case 'f':
-		// 换页符
-		ch = '\f'
-	case 'e':
-		// 颜色转义符
-		ch = '\x1b'
-	case 'a':
-		// 响铃符
-		ch = '\a'
-	case '\\':
-		// 反斜杠
-		ch = '\\'
-	case '"':
-		ch = '"'
+	case 0:
+		// 如果是EOF，则返回错误
+		return 0, ErrNotClosed{"EOF after escape character", 2}
+	case '\n':
+		// 如果是换行符，则跳过空白字符
+		p.skipWhitespace()
+		return 0, nil
+	case 'n': ch = '\n'	 // 换行符
+	case 'r': ch = '\r'	 // 回车符
+	case 't': ch = '\t'	 // 制表符
+	case 'b': ch = '\b'	 // 退格符
+	case 'f': ch = '\f'	 // 换页符
+	case 'e': ch = '\x1b'   // 颜色转义符
+	case 'a': ch = '\a'	 // 响铃符
+	case '\\':ch = '\\'	 // 反斜杠
+	case '"': ch = '"'
 	case 'u':
 		// 读取0~4个十六进制字符
 		var hex string
@@ -360,6 +342,23 @@ func splitOp(opString string) []string {
 	return ops
 }
 
+// parseEscape 解析转义字符
+func (p *parser) parseEscape() (Element, error) {
+	p.read()
+	ch := p.read()
+	switch ch {
+	case 0:
+		// 如果是EOF，则返回错误
+		return nil, ErrNotClosed{"EOF after escape character", 2}
+	case '\n':
+		// 如果是换行符，则跳过空白字符
+		p.skipWhitespace()
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("invalid escape character: %c at %s:%d:%d", ch, p.file, p.line, p.col)
+	}
+}
+
 // parseSymbol 解析符号
 func (p *parser) parseSymbol() (Element, error) {
 	// 创建一个字符串构建器
@@ -377,7 +376,27 @@ func (p *parser) parseSymbol() (Element, error) {
 
 		// 如果是左括号，则解析列表
 		if ch == '(' {
-			return p.parseList(splitOp(b.String())...)
+			ops := splitOp(b.String())
+			l, err := p.parseList()
+			if err != nil {
+				return nil, err
+			}
+			// 返回列表
+			if len(ops) > 0 {
+				var op string
+				for i:=len(ops)-1; i>=0; i-- {
+					op = ops[i]
+					switch op {
+					case "'":
+						l = List{Symbol{"quote"}, l}
+					case ",":
+						l = List{Symbol{"unquote"}, l}
+					default:
+						l = List{Symbol{op}, l}
+					}
+				}
+			}
+			return l, nil
 		}
 		// 如果是双引号
 		if ch == '"' {
@@ -387,6 +406,30 @@ func (p *parser) parseSymbol() (Element, error) {
 		// 读取字符
 		b.WriteRune(p.read())
 	}
+
+    ops := splitOp(b.String())
+    if len(ops) > 0 {
+        // 取最后一项
+        val := ops[len(ops)-1]
+        //如果最后一项是quote或者unquote，则报错
+        if val == "'" || val == "," {
+            return nil, fmt.Errorf("expected a element at %s:%d:%d", p.file, p.line, p.col)
+        }
+        // 返回列表
+        l := List{Symbol{val}}
+        for i:=len(ops)-2; i>=0; i-- {
+            op := ops[i]
+            switch op {
+            case "'":
+                l = List{Symbol{"quote"}, l}
+            case ",":
+                l = List{Symbol{"unquote"}, l}
+            default:
+                l = List{Symbol{op}, l}
+            }
+        }
+        return l, nil
+    }
 
 	// 返回符号
 	return Symbol{b.String()}, nil
